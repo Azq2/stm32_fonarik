@@ -1,5 +1,20 @@
 #pragma once
 
+// Делитель шага стробоскопа: 1 = 1 гц, 2 = 0.5 гц, 4 = 0.25 гц
+#define STROBOSCOPE_RESOLUTION 2
+
+// Стартовая частота
+#define STROBOSCOPE_DEFAULT 60
+
+// Минимальная частота
+#define STROBOSCOPE_MIN 15
+
+// Минимальная частота
+#define STROBOSCOPE_MAX 1000
+
+// Длительность свечения (мкс, переведённые в ГЦ)
+#define STROBOSCOPE_LIGHT (1000000 / 200)
+
 // 72000000 / 1000 = 72 khz
 #define PWM_PERIOD 1000
 
@@ -39,5 +54,6 @@ void init_encoder(int max);
 void timer_init();
 void pwm_init(int divider, uint16_t period, uint16_t pulse);
 void recalc_pwm_value();
+void on_mode_changed();
 int get_last_pwm();
 uint8_t crc8(const uint8_t *data, uint8_t len);

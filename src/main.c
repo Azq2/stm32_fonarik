@@ -11,6 +11,7 @@ int last_counter = 0;
 int safe_mode = 0;
 int safe_mode_try_disable = 0;
 int not_changed = 0;
+int freq_value = STROBOSCOPE_DEFAULT * STROBOSCOPE_RESOLUTION;
 int mode = 0; // 0 - фонарь, 1 - стробоскоп
 
 void main() {
@@ -25,8 +26,7 @@ void main() {
 	timer_init();
 	
 	pwm_value = get_last_pwm();
-	mode = GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_0);
-	recalc_pwm_value();
+	on_mode_changed();
 	
 	OW_Init();
 	
@@ -119,7 +119,13 @@ void main() {
 			}
 			
 			sched_counter = 0;
-			tfp_printf("TIM4->CCR4 - %d, safe_mode=%d, mode=%d\r\n", TIM4->CCR4, safe_mode, GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_0));
+			
+			if (mode) {
+				double freq = round((double) SystemCoreClock / (double) TIM4->PSC / (double) TIM4->ARR * 10);
+				int freq_n1 = freq / 10, 
+					freq_n2 = freq - (freq_n1 * 10);
+				tfp_printf("[stroboscope] freq=%d.%d Hz\r\n", freq_n1, freq_n2);
+			}
 		}
 	}
 }
@@ -133,13 +139,23 @@ int get_last_pwm() {
 	return pwm;
 }
 
-void recalc_pwm_value() {
-	// 200 uS ON
-	// 3000...55600 uS OFF
-	// 312.5 Hz
-	// 17.921146953405
-	// 5000
+void on_mode_changed() {
+	mode = !GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_0);
 	
+	if (!mode) {
+		TIM4->PSC = 0;
+		TIM4->CCR4 = 0;
+		TIM4->ARR = PWM_PERIOD;
+		TIM4->EGR = TIM_PSCReloadMode_Immediate;
+	}
+	
+	recalc_pwm_value();
+	
+	tfp_printf("mode = %s\r\n", mode ? "Stroboscope" : "Lighter");
+}
+
+void recalc_pwm_value() {
+	// Логарифмическая шкала яркости, генерируется через lg.php
 	const static uint16_t linear_to_log[] = {
 		0, 2, 4, 7, 9, 11, 13, 16, 18, 20, 
 		23, 25, 27, 30, 32, 35, 37, 40, 43, 45, 
@@ -155,31 +171,53 @@ void recalc_pwm_value() {
 	};
 	static int last_encoder = 0;
 	
-	pwm_value += (encoder_value - last_encoder);
-	if (pwm_value < 0)
-		pwm_value = 0;
-	if (pwm_value > ENCODER_MAX)
-		pwm_value = ENCODER_MAX;
+	if (mode) { // Стробоскоп, регулируем частоту
+		freq_value += (encoder_value - last_encoder);
+		if (freq_value < STROBOSCOPE_MIN * STROBOSCOPE_RESOLUTION)
+			freq_value = STROBOSCOPE_MIN * STROBOSCOPE_RESOLUTION;
+		if (freq_value > STROBOSCOPE_MAX * STROBOSCOPE_RESOLUTION)
+			freq_value = STROBOSCOPE_MAX * STROBOSCOPE_RESOLUTION;
+		
+		for (int psc = 10; psc <= 100; psc += 10) {
+			int arr = (int) round((double) (SystemCoreClock / psc) / ((double) freq_value / (double) STROBOSCOPE_RESOLUTION));
+			if (arr <= 65534) {
+				TIM4->ARR = arr;
+				TIM4->CCR4 = SystemCoreClock / STROBOSCOPE_LIGHT / psc;
+				
+				if (psc != TIM4->PSC) {
+					TIM4->PSC = psc;
+					TIM4->EGR = TIM_PSCReloadMode_Immediate;
+				}
+				
+				break;
+			}
+		}
+	} else { // Фонарь, регулируем яркость
+		pwm_value += (encoder_value - last_encoder);
+		if (pwm_value < 0)
+			pwm_value = 0;
+		if (pwm_value > ENCODER_MAX)
+			pwm_value = ENCODER_MAX;
+		
+		// Безопасный режим, в случае перегрева или выхода из строя термометра
+		// Максимум 50% яркости
+		if (safe_mode && pwm_value > ENCODER_MAX / 2)
+			TIM4->CCR4 = linear_to_log[ENCODER_MAX / 2];
+		else
+			TIM4->CCR4 = linear_to_log[pwm_value];
+		
+		not_changed = 0;
+	}
+	
 	last_encoder = encoder_value;
-	
-	// Безопасный режим, в случае перегрева или выхода из строя термометра
-	// Максимум 50% яркости
-	if (safe_mode && pwm_value > ENCODER_MAX / 2)
-		TIM4->CCR4 = linear_to_log[ENCODER_MAX / 2];
-	else
-		TIM4->CCR4 = linear_to_log[pwm_value];
-	
-	not_changed = 0;
 }
 
 void EXTI0_IRQHandler() {
 	int last_mode = mode;
 	mode = !GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_0);
 	EXTI_ClearITPendingBit(EXTI_Line0);
-	if (last_mode != mode) {
-		recalc_pwm_value();
-		tfp_printf("mode = %s\r\n", mode ? "Stroboscope" : "Lighter");
-	}
+	if (last_mode != mode)
+		on_mode_changed();
 }
 
 volatile void TIM2_IRQHandler() {
@@ -283,9 +321,10 @@ void init_encoder(int max) {
 }
 
 void timer_init() {
-	RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
-	
 	TIM_TimeBaseInitTypeDef tm;
+	
+	// TIM2
+	RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
 	
 	TIM_TimeBaseStructInit(&tm);
 	tm.TIM_Prescaler = 720;
